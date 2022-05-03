@@ -8,11 +8,13 @@ import {
   getOrCreateLiquidityPool,
   getOrCreateLiquidityPoolDailySnapshot,
   getOrCreateLiquidityPoolHourlySnapshot,
+  getOrCreateLiquidityPoolParamsHelper,
   getOrCreateToken,
 } from "../common/getters";
 import { getDays } from "../common/utils/datetime";
 import { BIGDECIMAL_TWO, BIGDECIMAL_ZERO, SECONDS_PER_HOUR, TransactionType } from "./constants";
-import { bigIntToBigDecimal } from "./utils/numbers";
+import { STARTING_BLOCKS_PER_DAY } from "./rewards";
+import { bigIntToBigDecimal, tokenAmountToUSDAmount } from "./utils/numbers";
 
 export function updateProtocolTVL(event: ethereum.Event): void {
   let protocol = getOrCreateDexAmm();
@@ -202,14 +204,33 @@ export function calculateSwapVolume(swap: Swap): BigDecimal {
   return swap.amountInUSD.plus(swap.amountOutUSD).div(BIGDECIMAL_TWO);
 }
 
+export function calculateSwapFeeInTokenAmount(poolAddress: Address, swap: Swap): BigDecimal {
+  // Fee calculation
+  // feeInTokenAmount = (haircut_rate * actual_amount) / (1 - haircut_rate)
+  let poolMetrics = getOrCreateLiquidityPoolParamsHelper(poolAddress);
+  let haircutRate = poolMetrics.HaircutRate;
+  let n: BigDecimal = haircutRate.times(swap.amountOut.toBigDecimal());
+  let d: BigDecimal = BigDecimal.fromString("1").minus(haircutRate);
+  return n.div(d);
+}
+
+export function calculateSwapFeeInUsd(event: ethereum.Event, poolAddress: Address, swap: Swap): BigDecimal {
+  // Fee calculation
+  // feeInTokenUsd = feeInTokenAmount * outputLPTokenPrice / feeInTokenAmount * outputTokenPrice? Assuming latter in current implementation
+  let feeInTokenAmount = calculateSwapFeeInTokenAmount(poolAddress, swap);
+  let feeToken = getOrCreateToken(event, Address.fromString(swap.tokenOut));
+  return tokenAmountToUSDAmount(feeToken, BigInt.fromString(feeInTokenAmount.toString().split(".")[0]));
+}
+
 function updateProtocolAndFinancialSwapVolume(event: ethereum.Event, swap: Swap): void {
   let protocol = getOrCreateDexAmm();
   let swapVolumetUsd = calculateSwapVolume(swap);
   protocol.cumulativeVolumeUSD = protocol.cumulativeVolumeUSD.plus(swapVolumetUsd);
-  protocol.save();
 
   let financialMetrics = getOrCreateFinancialsDailySnapshot(event);
   financialMetrics.dailyVolumeUSD = financialMetrics.dailyVolumeUSD.plus(swapVolumetUsd);
+
+  protocol.save();
   financialMetrics.save();
   updateFinancials(event);
 }
@@ -225,14 +246,14 @@ export function updateBalancesInPoolAfterSwap(event: ethereum.Event, swap: Swap)
   let balances: BigInt[] = pool.inputTokenBalances;
 
   for (let i = 0; i < pool.inputTokens.length; i++) {
-    // log.debug("trying to match {} with swap input token {}", [pool.inputTokens[i], swap.tokenIn]);
+    log.debug("trying to match {} with swap input token {}", [pool.inputTokens[i], swap.tokenIn]);
     if (pool.inputTokens[i] == swap.tokenIn) {
-      // log.debug("match found {} with input {}", [pool.inputTokens[i], swap.tokenIn]);
+      log.debug("match found {} with input {}", [pool.inputTokens[i], swap.tokenIn]);
       balances[i] = balances[i].plus(swap.amountIn);
     }
-    // log.debug("trying to match {} with swap input token {}", [pool.inputTokens[i], swap.tokenOut]);
+    log.debug("trying to match {} with swap input token {}", [pool.inputTokens[i], swap.tokenOut]);
     if (pool.inputTokens[i] == swap.tokenOut) {
-      // log.debug("match found {} with input {}", [pool.inputTokens[i], swap.tokenOut]);
+      log.debug("match found {} with input {}", [pool.inputTokens[i], swap.tokenOut]);
       balances[i] = balances[i].minus(swap.amountIn);
     }
   }
@@ -247,15 +268,15 @@ function updateHourlyPoolSwapVolume(event: ethereum.Event, swap: Swap): void {
   let hourlyVolumeByTokenAmount: BigInt[] = snapshot.hourlyVolumeByTokenAmount;
   log.debug("{}, {}", [hourlyVolumeByTokenAmount.toString(), hourlyVolumeByTokenUSD.toString()]);
   for (let i = 0; i < snapshot.inputTokens.length; i++) {
-    // log.debug("trying to match {} with swap input token {}", [snapshot.inputTokens[i], swap.tokenIn]);
+    log.debug("trying to match {} with swap input token {}", [snapshot.inputTokens[i], swap.tokenIn]);
     if (snapshot.inputTokens[i] == swap.tokenIn) {
-      // log.debug("match found {} with input {}", [snapshot.inputTokens[i], swap.tokenIn]);
+      log.debug("match found {} with input {}", [snapshot.inputTokens[i], swap.tokenIn]);
       hourlyVolumeByTokenUSD[i] = hourlyVolumeByTokenUSD[i].plus(swap.amountInUSD);
       hourlyVolumeByTokenAmount[i] = hourlyVolumeByTokenAmount[i].plus(swap.amountIn);
     }
-    // log.debug("trying to match {} with swap input token {}", [snapshot.inputTokens[i], swap.tokenOut]);
+    log.debug("trying to match {} with swap input token {}", [snapshot.inputTokens[i], swap.tokenOut]);
     if (snapshot.inputTokens[i] == swap.tokenOut) {
-      // log.debug("match found {} with input {}", [snapshot.inputTokens[i], swap.tokenOut]);
+      log.debug("match found {} with input {}", [snapshot.inputTokens[i], swap.tokenOut]);
       hourlyVolumeByTokenUSD[i] = hourlyVolumeByTokenUSD[i].plus(swap.amountOutUSD);
       hourlyVolumeByTokenAmount[i] = hourlyVolumeByTokenAmount[i].plus(swap.amountOut);
     }
@@ -274,15 +295,15 @@ function updateDailyPoolSwapVolume(event: ethereum.Event, swap: Swap): void {
   let dailyVolumeByTokenAmount: BigInt[] = snapshot.dailyVolumeByTokenAmount;
   log.debug("{}, {}", [dailyVolumeByTokenUSD.toString(), dailyVolumeByTokenAmount.toString()]);
   for (let i = 0; i < snapshot.inputTokens.length; i++) {
-    // log.debug("trying to match {} with swap input token {}", [snapshot.inputTokens[i], swap.tokenIn]);
+    log.debug("trying to match {} with swap input token {}", [snapshot.inputTokens[i], swap.tokenIn]);
     if (snapshot.inputTokens[i] == swap.tokenIn) {
-      // log.debug("match found {} with input {}", [snapshot.inputTokens[i], swap.tokenIn]);
+      log.debug("match found {} with input {}", [snapshot.inputTokens[i], swap.tokenIn]);
       dailyVolumeByTokenUSD[i] = dailyVolumeByTokenUSD[i].plus(swap.amountInUSD);
       dailyVolumeByTokenAmount[i] = dailyVolumeByTokenAmount[i].plus(swap.amountIn);
     }
-    // log.debug("trying to match {} with swap input token {}", [snapshot.inputTokens[i], swap.tokenOut]);
+    log.debug("trying to match {} with swap input token {}", [snapshot.inputTokens[i], swap.tokenOut]);
     if (snapshot.inputTokens[i] == swap.tokenOut) {
-      // log.debug("match found {} with input {}", [snapshot.inputTokens[i], swap.tokenOut]);
+      log.debug("match found {} with input {}", [snapshot.inputTokens[i], swap.tokenOut]);
       dailyVolumeByTokenUSD[i] = dailyVolumeByTokenUSD[i].plus(swap.amountOutUSD);
       dailyVolumeByTokenAmount[i] = dailyVolumeByTokenAmount[i].plus(swap.amountOut);
     }
@@ -306,4 +327,26 @@ export function updateSwapMetrics(event: ethereum.Event, swap: Swap): void {
   updateBalancesInPoolAfterSwap(event, swap);
   updateProtocolTVL(event);
   updateSwapTradingVolumes(event, swap);
+}
+
+function updateProtocolAndFinancialSwapFeeVolumes(event: ethereum.Event, poolAddress: Address, swap: Swap): void {
+  let protocol = getOrCreateDexAmm();
+  let swapFeeUsd = calculateSwapFeeInUsd(event, poolAddress, swap);
+
+  protocol.cumulativeSupplySideRevenueUSD = protocol.cumulativeSupplySideRevenueUSD.plus(swapFeeUsd);
+  protocol.cumulativeTotalRevenueUSD = protocol.cumulativeSupplySideRevenueUSD.plus(
+    protocol.cumulativeProtocolSideRevenueUSD,
+  );
+  protocol.save();
+
+  let snapshot = getOrCreateFinancialsDailySnapshot(event);
+  snapshot.dailySupplySideRevenueUSD = snapshot.dailySupplySideRevenueUSD.plus(swapFeeUsd);
+  snapshot.dailyTotalRevenueUSD = snapshot.dailySupplySideRevenueUSD.plus(snapshot.dailyProtocolSideRevenueUSD);
+  snapshot.cumulativeSupplySideRevenueUSD = protocol.cumulativeSupplySideRevenueUSD;
+  snapshot.cumulativeTotalRevenueUSD = protocol.cumulativeTotalRevenueUSD;
+  snapshot.save();
+}
+
+export function updateFeeMetrics(event: ethereum.Event, poolAddress: Address, swap: Swap): void {
+  updateProtocolAndFinancialSwapFeeVolumes(event, poolAddress, swap);
 }
